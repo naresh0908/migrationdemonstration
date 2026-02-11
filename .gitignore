@@ -1,0 +1,21 @@
+# Environment files
+.env
+flyway.conf
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Flyway temporary files
+*.tmp
+
+# Flyway ignores
+*.user.toml
+*.artifact
+report.html
+report.json

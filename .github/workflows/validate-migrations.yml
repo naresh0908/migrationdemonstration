@@ -1,0 +1,146 @@
+name: Validate Database Migrations
+
+on:
+  pull_request:
+    paths:
+      - 'db/migrations/**'
+      - 'db/seeds/**'
+      - 'flyway.conf'
+  push:
+    branches:
+      - main
+    paths:
+      - 'db/migrations/**'
+      - 'db/seeds/**'
+
+jobs:
+  validate-migrations:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_DB: test_db
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install Flyway
+        run: |
+          wget -qO- https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/9.22.3/flyway-commandline-9.22.3-linux-x64.tar.gz | tar xvz
+          sudo ln -s $(pwd)/flyway-9.22.3/flyway /usr/local/bin/flyway
+          flyway -v
+
+      - name: Configure Flyway
+        run: |
+          cat > flyway.test.conf << EOF
+          flyway.url=jdbc:postgresql://localhost:5432/test_db
+          flyway.user=test_user
+          flyway.password=test_password
+          flyway.locations=filesystem:./db/migrations
+          flyway.schemas=public
+          flyway.createSchemas=true
+          EOF
+
+      - name: Validate migrations
+        run: |
+          flyway -configFiles=flyway.test.conf info
+          flyway -configFiles=flyway.test.conf validate
+
+      - name: Run migrations
+        run: |
+          flyway -configFiles=flyway.test.conf migrate
+          flyway -configFiles=flyway.test.conf info
+
+      - name: Test migration rollback capability
+        run: |
+          flyway -configFiles=flyway.test.conf clean
+          flyway -configFiles=flyway.test.conf migrate
+          echo "✅ Migrations can be rerun successfully"
+
+      - name: Check for SQL syntax errors
+        run: |
+          echo "Checking SQL files for basic syntax..."
+          for file in db/migrations/*.sql; do
+            echo "Checking $file"
+            # Basic syntax check - will fail if there are obvious errors
+            psql -h localhost -U test_user -d test_db -f "$file" --single-transaction --set ON_ERROR_STOP=on
+          done
+        env:
+          PGPASSWORD: test_password
+
+  check-migration-naming:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Validate migration file names
+        run: |
+          echo "Checking migration file naming conventions..."
+          invalid_files=0
+          
+          for file in db/migrations/*.sql; do
+            filename=$(basename "$file")
+            
+            # Check if filename matches Flyway convention: V{version}__{description}.sql
+            if ! [[ $filename =~ ^V[0-9]+(\.[0-9]+)?__[a-z0-9_]+\.sql$ ]]; then
+              echo "❌ Invalid migration filename: $filename"
+              echo "   Expected format: V{number}__{description}.sql"
+              echo "   Example: V1__create_users_table.sql"
+              invalid_files=$((invalid_files+1))
+            else
+              echo "✅ Valid: $filename"
+            fi
+          done
+          
+          if [ $invalid_files -gt 0 ]; then
+            echo ""
+            echo "❌ Found $invalid_files invalid migration file name(s)"
+            exit 1
+          else
+            echo ""
+            echo "✅ All migration files follow naming convention"
+          fi
+
+  check-for-conflicts:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check for duplicate version numbers
+        run: |
+          echo "Checking for duplicate version numbers..."
+          
+          versions=$(ls db/migrations/*.sql | grep -oP 'V\K[0-9]+(\.[0-9]+)?' | sort)
+          duplicates=$(echo "$versions" | uniq -d)
+          
+          if [ -n "$duplicates" ]; then
+            echo "❌ Found duplicate version numbers:"
+            echo "$duplicates"
+            exit 1
+          else
+            echo "✅ No duplicate version numbers found"
+          fi
